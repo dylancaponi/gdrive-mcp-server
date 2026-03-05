@@ -1,0 +1,296 @@
+#!/usr/bin/env node
+
+import { authenticate } from "@google-cloud/local-auth";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListToolsRequestSchema,
+  ReadResourceRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import fs from "fs";
+import { google } from "googleapis";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_QUERY_LENGTH = 1000;
+
+function writeCredentials(filePath: string, data: unknown): void {
+  const json = JSON.stringify(data);
+  const tmpPath = `${filePath}.tmp`;
+  fs.writeFileSync(tmpPath, json, { mode: 0o600 });
+  fs.renameSync(tmpPath, filePath);
+}
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const DEFAULT_CREDENTIALS_PATH = path.join(
+  __dirname,
+  "../../../.gdrive-server-credentials.json",
+);
+const DEFAULT_OAUTH_PATH = path.join(
+  __dirname,
+  "../../../gcp-oauth.keys.json",
+);
+
+const credentialsPath =
+  process.env.GDRIVE_CREDENTIALS_PATH || DEFAULT_CREDENTIALS_PATH;
+const oauthKeysPath =
+  process.env.GDRIVE_OAUTH_PATH || DEFAULT_OAUTH_PATH;
+
+const drive = google.drive("v3");
+
+const server = new Server(
+  {
+    name: "gdrive-mcp-server",
+    version: "0.7.0",
+  },
+  {
+    capabilities: {
+      resources: {},
+      tools: {},
+    },
+  },
+);
+
+server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
+  const pageSize = 10;
+  const params: Record<string, unknown> = {
+    pageSize,
+    fields: "nextPageToken, files(id, name, mimeType)",
+  };
+
+  if (request.params?.cursor) {
+    params.pageToken = request.params.cursor;
+  }
+
+  const res = await drive.files.list(params);
+  const files = res.data.files ?? [];
+
+  return {
+    resources: files.map((file) => ({
+      uri: `gdrive:///${file.id}`,
+      mimeType: file.mimeType ?? undefined,
+      name: file.name ?? "Untitled",
+    })),
+    nextCursor: res.data.nextPageToken ?? undefined,
+  };
+});
+
+server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  const uri = request.params.uri;
+  if (!uri.startsWith("gdrive:///")) {
+    throw new Error("Invalid resource URI: must start with gdrive:///");
+  }
+  const fileId = uri.replace("gdrive:///", "");
+  if (!fileId || !/^[a-zA-Z0-9_-]+$/.test(fileId)) {
+    throw new Error("Invalid file ID");
+  }
+
+  const file = await drive.files.get({
+    fileId,
+    fields: "mimeType, size",
+  });
+
+  if (file.data.mimeType?.startsWith("application/vnd.google-apps")) {
+    let exportMimeType: string;
+    switch (file.data.mimeType) {
+      case "application/vnd.google-apps.document":
+        exportMimeType = "text/markdown";
+        break;
+      case "application/vnd.google-apps.spreadsheet":
+        exportMimeType = "text/csv";
+        break;
+      case "application/vnd.google-apps.presentation":
+        exportMimeType = "text/plain";
+        break;
+      case "application/vnd.google-apps.drawing":
+        exportMimeType = "image/png";
+        break;
+      default:
+        exportMimeType = "text/plain";
+    }
+
+    const res = await drive.files.export(
+      { fileId, mimeType: exportMimeType },
+      { responseType: "text" },
+    );
+
+    return {
+      contents: [
+        {
+          uri: request.params.uri,
+          mimeType: exportMimeType,
+          text: String(res.data),
+        },
+      ],
+    };
+  }
+
+  const fileSize = parseInt(file.data.size ?? "0", 10);
+  if (fileSize > MAX_FILE_SIZE_BYTES) {
+    throw new Error(
+      `File too large (${Math.round(fileSize / 1024 / 1024)} MB). ` +
+        `Maximum supported size is ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB.`,
+    );
+  }
+
+  const res = await drive.files.get(
+    { fileId, alt: "media" },
+    { responseType: "arraybuffer" },
+  );
+  const mimeType = file.data.mimeType || "application/octet-stream";
+  if (mimeType.startsWith("text/") || mimeType === "application/json") {
+    return {
+      contents: [
+        {
+          uri: request.params.uri,
+          mimeType: mimeType,
+          text: Buffer.from(res.data as ArrayBuffer).toString("utf-8"),
+        },
+      ],
+    };
+  }
+  return {
+    contents: [
+      {
+        uri: request.params.uri,
+        mimeType: mimeType,
+        blob: Buffer.from(res.data as ArrayBuffer).toString("base64"),
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return {
+    tools: [
+      {
+        name: "search",
+        description: "Search for files in Google Drive",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string",
+              description: "Search query",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    ],
+  };
+});
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === "search") {
+    const userQuery = request.params.arguments?.query as string;
+    if (!userQuery || typeof userQuery !== "string") {
+      throw new Error("Search query must be a non-empty string");
+    }
+    if (userQuery.length > MAX_QUERY_LENGTH) {
+      throw new Error(`Search query too long (max ${MAX_QUERY_LENGTH} characters)`);
+    }
+    const escapedQuery = userQuery.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const formattedQuery = `fullText contains '${escapedQuery}'`;
+
+    const res = await drive.files.list({
+      q: formattedQuery,
+      pageSize: 10,
+      fields: "files(id, name, mimeType, modifiedTime, size)",
+    });
+
+    const files = res.data.files ?? [];
+    const fileList = files
+      .map((file) => `${file.name} (${file.mimeType}) [id: ${file.id}]`)
+      .join("\n");
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Found ${files.length} files:\n${fileList}`,
+        },
+      ],
+      isError: false,
+    };
+  }
+  throw new Error(`Unknown tool: ${request.params.name}`);
+});
+
+function loadOAuthKeys(): { client_id: string; client_secret: string } {
+  if (!fs.existsSync(oauthKeysPath)) {
+    console.error(
+      "OAuth keys file not found. " +
+        "Set GDRIVE_OAUTH_PATH or place gcp-oauth.keys.json in the expected location.",
+    );
+    process.exit(1);
+  }
+  const raw = JSON.parse(fs.readFileSync(oauthKeysPath, "utf-8"));
+  const keys = raw.installed || raw.web;
+  if (!keys?.client_id || !keys?.client_secret) {
+    console.error("OAuth keys file is missing client_id or client_secret.");
+    process.exit(1);
+  }
+  return { client_id: keys.client_id, client_secret: keys.client_secret };
+}
+
+async function authenticateAndSaveCredentials() {
+  console.log("Launching auth flow...");
+  const auth = await authenticate({
+    keyfilePath: oauthKeysPath,
+    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+  });
+  writeCredentials(credentialsPath, auth.credentials);
+  console.log("Credentials saved. You can now run the server.");
+}
+
+async function loadCredentialsAndRunServer() {
+  if (!fs.existsSync(credentialsPath)) {
+    console.error(
+      "Credentials not found. Please run with 'auth' argument first.",
+    );
+    process.exit(1);
+  }
+
+  const credentials = JSON.parse(fs.readFileSync(credentialsPath, "utf-8"));
+  const { client_id, client_secret } = loadOAuthKeys();
+
+  // FIX: Pass client_id and client_secret so the library can auto-refresh
+  // the access token using the refresh_token before each API call.
+  const auth = new google.auth.OAuth2(client_id, client_secret);
+  auth.setCredentials(credentials);
+
+  // Persist refreshed tokens back to disk so restarts also get fresh tokens.
+  auth.on("tokens", (tokens) => {
+    try {
+      const existing = JSON.parse(fs.readFileSync(credentialsPath, "utf-8"));
+      const updated = {
+        ...existing,
+        access_token: tokens.access_token ?? existing.access_token,
+        expiry_date: tokens.expiry_date ?? existing.expiry_date,
+      };
+      if (tokens.refresh_token) {
+        updated.refresh_token = tokens.refresh_token;
+      }
+      writeCredentials(credentialsPath, updated);
+      console.error("Tokens refreshed and saved to disk.");
+    } catch (err) {
+      console.error("Failed to persist refreshed tokens:", err);
+    }
+  });
+
+  google.options({ auth });
+
+  console.error("Credentials loaded. Starting server.");
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+if (process.argv[2] === "auth") {
+  authenticateAndSaveCredentials().catch(console.error);
+} else {
+  loadCredentialsAndRunServer().catch(console.error);
+}
