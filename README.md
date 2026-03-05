@@ -18,6 +18,9 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 - **Download tool**: Save files to a local directory instead of returning base64 blobs that overflow LLM context windows
 - **Sheets read tool**: Read Google Sheets with A1 range notation, returned as formatted markdown tables
 - **Shared Drive support**: Search and read files from Shared Drives (formerly Team Drives)
+- **Folder listing**: Browse Drive folders by ID
+- **PDF export**: Export Google Workspace files as PDF
+- **File upload**: Push local files to Drive (opt-in, requires `drive` scope)
 - **Opt-in resources**: MCP resource handlers are disabled by default to prevent hangs in clients that call `resources/list` on startup
 
 ## Setup
@@ -85,7 +88,8 @@ claude mcp add --scope user gdrive -- node /path/to/gdrive-mcp-server/dist/index
 | `GDRIVE_OAUTH_PATH` | `gcp-oauth.keys.json` (relative to package) | Path to OAuth client keys |
 | `GDRIVE_ENABLE_RESOURCES` | `false` | Set to `true` to enable MCP resource handlers (`gdrive:///` URIs). Disabled by default because some MCP clients call `resources/list` on startup, which triggers `drive.files.list()` and can hang. |
 | `GDRIVE_ENABLE_SHEETS` | `false` | Set to `true` to enable the `sheets_read` tool and request the `spreadsheets.readonly` OAuth scope. Requires enabling the Google Sheets API in your GCP project and re-running `auth`. |
-| `GDRIVE_DOWNLOAD_DIR` | System temp dir + `/gdrive-downloads` | Directory where the `download` tool saves files |
+| `GDRIVE_ENABLE_UPLOAD` | `false` | Set to `true` to enable the `upload` tool. Upgrades the OAuth scope from `drive.readonly` to `drive` (full read/write). Requires re-running `auth`. |
+| `GDRIVE_DOWNLOAD_DIR` | System temp dir + `/gdrive-downloads` | Directory where the `download` and `export_pdf` tools save files |
 
 ## Tools
 
@@ -114,8 +118,35 @@ Download a file from Google Drive to a local directory. Same auto-conversion as 
 
 Returns the local file path where the file was saved.
 
-### `sheets_read`
-Read a Google Sheets spreadsheet with optional A1 range notation. Returns a formatted markdown table with headers. More structured than reading a sheet as CSV via the `read` tool.
+### `list_folder`
+List files in a Google Drive folder. Returns file names, types, sizes, and IDs.
+
+```json
+{ "folderId": "root" }
+```
+
+Use `"root"` for the top-level My Drive folder, or a folder ID from search results.
+
+### `export_pdf`
+Export a Google Workspace file (Doc, Sheet, Slide, Drawing) as PDF and save it locally.
+
+```json
+{ "fileId": "1abc123def456" }
+```
+
+Returns the local file path where the PDF was saved.
+
+### `upload` (opt-in)
+Upload a local file to Google Drive. Requires `GDRIVE_ENABLE_UPLOAD=true`.
+
+```json
+{ "localPath": "/path/to/file.pdf", "name": "My Report.pdf", "parentFolderId": "folder_id" }
+```
+
+Only `localPath` is required. `name` defaults to the local filename. `parentFolderId` is optional.
+
+### `sheets_read` (opt-in)
+Read a Google Sheets spreadsheet with optional A1 range notation. Returns a formatted markdown table with headers. More structured than reading a sheet as CSV via the `read` tool. Requires `GDRIVE_ENABLE_SHEETS=true`.
 
 ```json
 { "spreadsheetId": "1abc123def456", "range": "Sheet1!A1:D20" }

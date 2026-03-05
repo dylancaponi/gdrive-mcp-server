@@ -20,6 +20,7 @@ const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 const MAX_QUERY_LENGTH = 1000;
 const ENABLE_RESOURCES = process.env.GDRIVE_ENABLE_RESOURCES === "true";
 const ENABLE_SHEETS = process.env.GDRIVE_ENABLE_SHEETS === "true";
+const ENABLE_UPLOAD = process.env.GDRIVE_ENABLE_UPLOAD === "true";
 const DOWNLOAD_DIR =
   process.env.GDRIVE_DOWNLOAD_DIR ||
   path.join(os.tmpdir(), "gdrive-downloads");
@@ -49,7 +50,7 @@ if (ENABLE_RESOURCES) {
 const server = new Server(
   {
     name: "gdrive-mcp-server",
-    version: "0.9.0",
+    version: "0.10.0",
   },
   {
     capabilities: serverCapabilities,
@@ -264,6 +265,69 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     },
   ];
 
+  tools.push(
+    {
+      name: "list_folder",
+      description:
+        "List files in a Google Drive folder. Use the folder ID from search results, " +
+        "or 'root' for the top-level My Drive folder.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          folderId: {
+            type: "string",
+            description:
+              "The folder ID (from search results), or 'root' for My Drive top level",
+          },
+        },
+        required: ["folderId"],
+      },
+    },
+    {
+      name: "export_pdf",
+      description:
+        "Export a Google Workspace file (Doc, Sheet, Slide) as PDF and save it locally. " +
+        "Use the file ID from search results.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          fileId: {
+            type: "string",
+            description: "The Google Drive file ID (from search results)",
+          },
+        },
+        required: ["fileId"],
+      },
+    },
+  );
+
+  if (ENABLE_UPLOAD) {
+    tools.push({
+      name: "upload",
+      description:
+        "Upload a local file to Google Drive. Optionally specify a parent folder ID. " +
+        "Requires GDRIVE_ENABLE_UPLOAD=true and the drive scope.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          localPath: {
+            type: "string",
+            description: "Absolute path to the local file to upload",
+          },
+          name: {
+            type: "string",
+            description: "Name for the file in Google Drive (defaults to local filename)",
+          },
+          parentFolderId: {
+            type: "string",
+            description: "Optional folder ID to upload into",
+          },
+        },
+        required: ["localPath"],
+      },
+    });
+  }
+
   if (ENABLE_SHEETS) {
     tools.push({
       name: "sheets_read",
@@ -464,6 +528,153 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: false,
     };
   }
+  if (request.params.name === "list_folder") {
+    const folderId = request.params.arguments?.folderId as string;
+    if (!folderId || typeof folderId !== "string") {
+      throw new Error("folderId must be a non-empty string");
+    }
+    if (folderId !== "root" && !/^[a-zA-Z0-9_-]+$/.test(folderId)) {
+      throw new Error("Invalid folder ID");
+    }
+
+    const res = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      pageSize: 100,
+      fields: "files(id,name,mimeType,size,modifiedTime)",
+      orderBy: "folder,name",
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    const files = res.data.files ?? [];
+    if (files.length === 0) {
+      return {
+        content: [{ type: "text" as const, text: "Folder is empty." }],
+        isError: false,
+      };
+    }
+
+    const lines = files.map((f) => {
+      const icon =
+        f.mimeType === "application/vnd.google-apps.folder" ? "📁" : "📄";
+      const size = f.size ? ` (${Math.round(parseInt(f.size, 10) / 1024)} KB)` : "";
+      return `${icon} ${f.name}${size} [${f.mimeType}] [id: ${f.id}]`;
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `${files.length} items:\n${lines.join("\n")}`,
+        },
+      ],
+      isError: false,
+    };
+  }
+  if (request.params.name === "export_pdf") {
+    const fileId = request.params.arguments?.fileId as string;
+    if (!fileId || typeof fileId !== "string") {
+      throw new Error("fileId must be a non-empty string");
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(fileId)) {
+      throw new Error("Invalid file ID");
+    }
+
+    const file = await drive.files.get({
+      fileId,
+      fields: "name,mimeType",
+      supportsAllDrives: true,
+    });
+
+    const fileName = file.data.name ?? "untitled";
+    const mimeType = file.data.mimeType ?? "";
+
+    if (!mimeType.startsWith("application/vnd.google-apps")) {
+      throw new Error(
+        `File "${fileName}" is not a Google Workspace file (${mimeType}). ` +
+          "Only Docs, Sheets, Slides, and Drawings can be exported as PDF.",
+      );
+    }
+
+    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+    const res = await drive.files.export(
+      { fileId, mimeType: "application/pdf" },
+      { responseType: "arraybuffer" },
+    );
+
+    const safeName = sanitizeFilename(fileName) + ".pdf";
+    const destPath = path.join(DOWNLOAD_DIR, safeName);
+    fs.writeFileSync(destPath, Buffer.from(res.data as ArrayBuffer));
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Exported "${fileName}" as PDF to ${destPath}`,
+        },
+      ],
+      isError: false,
+    };
+  }
+  if (request.params.name === "upload") {
+    if (!ENABLE_UPLOAD) {
+      throw new Error(
+        "Upload is disabled. Set GDRIVE_ENABLE_UPLOAD=true and re-auth with the drive scope.",
+      );
+    }
+
+    const localPath = request.params.arguments?.localPath as string;
+    if (!localPath || typeof localPath !== "string") {
+      throw new Error("localPath must be a non-empty string");
+    }
+    if (!path.isAbsolute(localPath)) {
+      throw new Error("localPath must be an absolute path");
+    }
+    if (!fs.existsSync(localPath)) {
+      throw new Error(`File not found: ${localPath}`);
+    }
+
+    const stat = fs.statSync(localPath);
+    if (stat.size > MAX_FILE_SIZE_BYTES) {
+      throw new Error(
+        `File too large (${Math.round(stat.size / 1024 / 1024)} MB). ` +
+          `Maximum supported size is ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB.`,
+      );
+    }
+
+    const uploadName =
+      (request.params.arguments?.name as string) || path.basename(localPath);
+    const parentFolderId = request.params.arguments?.parentFolderId as
+      | string
+      | undefined;
+    if (parentFolderId && !/^[a-zA-Z0-9_-]+$/.test(parentFolderId)) {
+      throw new Error("Invalid parent folder ID");
+    }
+
+    const fileMetadata: Record<string, unknown> = { name: uploadName };
+    if (parentFolderId) {
+      fileMetadata.parents = [parentFolderId];
+    }
+
+    const res = await drive.files.create({
+      requestBody: fileMetadata,
+      media: {
+        body: fs.createReadStream(localPath),
+      },
+      fields: "id,name,webViewLink",
+      supportsAllDrives: true,
+    });
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Uploaded "${res.data.name}" [id: ${res.data.id}]${res.data.webViewLink ? `\n${res.data.webViewLink}` : ""}`,
+        },
+      ],
+      isError: false,
+    };
+  }
   if (request.params.name === "download") {
     const fileId = request.params.arguments?.fileId as string;
     if (!fileId || typeof fileId !== "string") {
@@ -558,7 +769,12 @@ function loadOAuthKeys(): { client_id: string; client_secret: string } {
 
 async function authenticateAndSaveCredentials() {
   console.log("Launching auth flow...");
-  const scopes = ["https://www.googleapis.com/auth/drive.readonly"];
+  const scopes: string[] = [];
+  if (ENABLE_UPLOAD) {
+    scopes.push("https://www.googleapis.com/auth/drive");
+  } else {
+    scopes.push("https://www.googleapis.com/auth/drive.readonly");
+  }
   if (ENABLE_SHEETS) {
     scopes.push("https://www.googleapis.com/auth/spreadsheets.readonly");
   }
