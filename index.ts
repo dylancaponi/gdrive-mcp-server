@@ -19,6 +19,7 @@ import path from "path";
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 const MAX_QUERY_LENGTH = 1000;
 const ENABLE_RESOURCES = process.env.GDRIVE_ENABLE_RESOURCES === "true";
+const ENABLE_SHEETS = process.env.GDRIVE_ENABLE_SHEETS === "true";
 const DOWNLOAD_DIR =
   process.env.GDRIVE_DOWNLOAD_DIR ||
   path.join(os.tmpdir(), "gdrive-downloads");
@@ -38,7 +39,7 @@ const oauthKeysPath =
   path.join(os.homedir(), "gcp-oauth.keys.json");
 
 let drive: drive_v3.Drive;
-let sheets: sheets_v4.Sheets;
+let sheets: sheets_v4.Sheets | null = null;
 
 const serverCapabilities: Record<string, Record<string, never>> = { tools: {} };
 if (ENABLE_RESOURCES) {
@@ -207,82 +208,89 @@ function sanitizeFilename(name: string): string {
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "search",
-        description: "Search for files in Google Drive",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            query: {
-              type: "string",
-              description: "Search query",
-            },
+  const tools: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }> = [
+    {
+      name: "search",
+      description: "Search for files in Google Drive",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          query: {
+            type: "string",
+            description: "Search query",
           },
-          required: ["query"],
         },
+        required: ["query"],
       },
-      {
-        name: "read",
-        description:
-          "Read a file's contents from Google Drive and return it inline. " +
-          "Google Docs are exported as Markdown, Sheets as CSV, " +
-          "Presentations as plain text. Binary files return a base64 snippet. " +
-          "For large files, use the download tool instead.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            fileId: {
-              type: "string",
-              description: "The Google Drive file ID (from search results)",
-            },
+    },
+    {
+      name: "read",
+      description:
+        "Read a file's contents from Google Drive and return it inline. " +
+        "Google Docs are exported as Markdown, Sheets as CSV, " +
+        "Presentations as plain text. Binary files return a base64 snippet. " +
+        "For large files, use the download tool instead.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          fileId: {
+            type: "string",
+            description: "The Google Drive file ID (from search results)",
           },
-          required: ["fileId"],
         },
+        required: ["fileId"],
       },
-      {
-        name: "download",
-        description:
-          "Download a file from Google Drive to a local directory. " +
-          "Google Docs are exported as Markdown, Sheets as CSV, " +
-          "Presentations as plain text. Use the file ID from search results.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            fileId: {
-              type: "string",
-              description: "The Google Drive file ID (from search results)",
-            },
+    },
+    {
+      name: "download",
+      description:
+        "Download a file from Google Drive to a local directory. " +
+        "Google Docs are exported as Markdown, Sheets as CSV, " +
+        "Presentations as plain text. Use the file ID from search results.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          fileId: {
+            type: "string",
+            description: "The Google Drive file ID (from search results)",
           },
-          required: ["fileId"],
         },
+        required: ["fileId"],
       },
-      {
-        name: "sheets_read",
-        description:
-          "Read a Google Sheets spreadsheet with optional range (A1 notation). " +
-          "Returns cell values as a formatted table. More structured than reading " +
-          "a sheet as CSV via the read tool.",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            spreadsheetId: {
-              type: "string",
-              description: "The Google Sheets spreadsheet ID",
-            },
-            range: {
-              type: "string",
-              description:
-                "Optional A1 range (e.g. 'Sheet1!A1:C10', 'A1:Z', 'Sheet1'). " +
-                "Omit to read the first sheet.",
-            },
+    },
+  ];
+
+  if (ENABLE_SHEETS) {
+    tools.push({
+      name: "sheets_read",
+      description:
+        "Read a Google Sheets spreadsheet with optional range (A1 notation). " +
+        "Returns cell values as a formatted table. More structured than reading " +
+        "a sheet as CSV via the read tool.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          spreadsheetId: {
+            type: "string",
+            description: "The Google Sheets spreadsheet ID",
           },
-          required: ["spreadsheetId"],
+          range: {
+            type: "string",
+            description:
+              "Optional A1 range (e.g. 'Sheet1!A1:C10', 'A1:Z', 'Sheet1'). " +
+              "Omit to read the first sheet.",
+          },
         },
+        required: ["spreadsheetId"],
       },
-    ],
-  };
+    });
+  }
+
+  return { tools };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -390,6 +398,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
   if (request.params.name === "sheets_read") {
+    if (!sheets) {
+      throw new Error(
+        "Sheets support is disabled. Set GDRIVE_ENABLE_SHEETS=true and re-auth with the spreadsheets.readonly scope.",
+      );
+    }
     const spreadsheetId = request.params.arguments?.spreadsheetId as string;
     if (!spreadsheetId || typeof spreadsheetId !== "string") {
       throw new Error("spreadsheetId must be a non-empty string");
@@ -545,12 +558,13 @@ function loadOAuthKeys(): { client_id: string; client_secret: string } {
 
 async function authenticateAndSaveCredentials() {
   console.log("Launching auth flow...");
+  const scopes = ["https://www.googleapis.com/auth/drive.readonly"];
+  if (ENABLE_SHEETS) {
+    scopes.push("https://www.googleapis.com/auth/spreadsheets.readonly");
+  }
   const auth = await authenticate({
     keyfilePath: oauthKeysPath,
-    scopes: [
-      "https://www.googleapis.com/auth/drive.readonly",
-      "https://www.googleapis.com/auth/spreadsheets.readonly",
-    ],
+    scopes,
   });
   writeCredentials(credentialsPath, auth.credentials);
   console.log("Credentials saved. You can now run the server.");
@@ -590,7 +604,9 @@ async function loadCredentialsAndRunServer() {
   });
 
   drive = new drive_v3.Drive({ auth });
-  sheets = new sheets_v4.Sheets({ auth });
+  if (ENABLE_SHEETS) {
+    sheets = new sheets_v4.Sheets({ auth });
+  }
 
   console.error("Credentials loaded. Starting server.");
   const transport = new StdioServerTransport();

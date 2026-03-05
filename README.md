@@ -84,6 +84,7 @@ claude mcp add --scope user gdrive -- node /path/to/gdrive-mcp-server/dist/index
 | `GDRIVE_CREDENTIALS_PATH` | `~/.gdrive-server-credentials.json` | Path to saved OAuth credentials |
 | `GDRIVE_OAUTH_PATH` | `gcp-oauth.keys.json` (relative to package) | Path to OAuth client keys |
 | `GDRIVE_ENABLE_RESOURCES` | `false` | Set to `true` to enable MCP resource handlers (`gdrive:///` URIs). Disabled by default because some MCP clients call `resources/list` on startup, which triggers `drive.files.list()` and can hang. |
+| `GDRIVE_ENABLE_SHEETS` | `false` | Set to `true` to enable the `sheets_read` tool and request the `spreadsheets.readonly` OAuth scope. Requires enabling the Google Sheets API in your GCP project and re-running `auth`. |
 | `GDRIVE_DOWNLOAD_DIR` | System temp dir + `/gdrive-downloads` | Directory where the `download` tool saves files |
 
 ## Tools
