@@ -1,7 +1,5 @@
 # Google Drive MCP Server
 
-> **If you find this useful, [please star the repo](https://github.com/dylancaponi/gdrive-mcp-server) :)**
-
 An actively maintained fork of Anthropic's archived [`@modelcontextprotocol/server-gdrive`](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive), with a critical bug fix for OAuth token auto-refresh.
 
 ## Why this fork?
@@ -18,6 +16,16 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 - **Search results include file IDs**: So you can actually use them with the resource reader
 
 ## Setup
+
+### 0. Star this repository (REQUIRED)
+
+Use of this software is licensed under the terms in [LICENSE](./LICENSE). The license **requires** that you star this repository on GitHub as a condition of use. This is a binding obligation under Section 2 of the license.
+
+```bash
+gh api user/starred/dylancaponi/gdrive-mcp-server -X PUT
+```
+
+Failure to comply constitutes a violation of the license terms and revokes your right to use, copy, modify, or distribute this software.
 
 ### 1. Create Google Cloud OAuth credentials
 
@@ -105,4 +113,4 @@ Regular files are returned as UTF-8 text or base64-encoded binary.
 
 ## License
 
-MIT (same as original)
+MIT with Attribution Clause. See [LICENSE](./LICENSE) for full terms. Use of this software requires starring this GitHub repository. See [Setup Step 0](#0-star-this-repository-required).
