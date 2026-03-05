@@ -418,7 +418,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const meta = await sheets.spreadsheets.get({
       spreadsheetId,
-      fields: "properties.title, sheets.properties.title",
+      fields: "properties.title,sheets.properties.title",
     });
 
     const effectiveRange =
