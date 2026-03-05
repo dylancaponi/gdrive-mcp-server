@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { authenticate } from "@google-cloud/local-auth";
+import { drive_v3 } from "@googleapis/drive";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -10,10 +11,9 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
-import { google } from "googleapis";
+import { OAuth2Client } from "google-auth-library";
 import os from "os";
 import path from "path";
-import { fileURLToPath } from "url";
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 const MAX_QUERY_LENGTH = 1000;
@@ -29,23 +29,14 @@ function writeCredentials(filePath: string, data: unknown): void {
   fs.renameSync(tmpPath, filePath);
 }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const DEFAULT_CREDENTIALS_PATH = path.join(
-  __dirname,
-  "../../../.gdrive-server-credentials.json",
-);
-const DEFAULT_OAUTH_PATH = path.join(
-  __dirname,
-  "../../../gcp-oauth.keys.json",
-);
-
 const credentialsPath =
-  process.env.GDRIVE_CREDENTIALS_PATH || DEFAULT_CREDENTIALS_PATH;
+  process.env.GDRIVE_CREDENTIALS_PATH ||
+  path.join(os.homedir(), ".gdrive-server-credentials.json");
 const oauthKeysPath =
-  process.env.GDRIVE_OAUTH_PATH || DEFAULT_OAUTH_PATH;
+  process.env.GDRIVE_OAUTH_PATH ||
+  path.join(os.homedir(), "gcp-oauth.keys.json");
 
-const drive = google.drive("v3");
+let drive: drive_v3.Drive;
 
 const serverCapabilities: Record<string, Record<string, never>> = { tools: {} };
 if (ENABLE_RESOURCES) {
@@ -391,9 +382,7 @@ async function loadCredentialsAndRunServer() {
   const credentials = JSON.parse(fs.readFileSync(credentialsPath, "utf-8"));
   const { client_id, client_secret } = loadOAuthKeys();
 
-  // FIX: Pass client_id and client_secret so the library can auto-refresh
-  // the access token using the refresh_token before each API call.
-  const auth = new google.auth.OAuth2(client_id, client_secret);
+  const auth = new OAuth2Client(client_id, client_secret);
   auth.setCredentials(credentials);
 
   // Persist refreshed tokens back to disk so restarts also get fresh tokens.
@@ -415,7 +404,7 @@ async function loadCredentialsAndRunServer() {
     }
   });
 
-  google.options({ auth });
+  drive = new drive_v3.Drive({ auth });
 
   console.error("Credentials loaded. Starting server.");
   const transport = new StdioServerTransport();

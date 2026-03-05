@@ -20,8 +20,9 @@
   },
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
+    "@googleapis/drive": "^20.1.0",
     "@modelcontextprotocol/sdk": "^1.0.1",
-    "googleapis": "^144.0.0"
+    "google-auth-library": "^10.6.1"
   },
   "devDependencies": {
     "@types/node": "^22",
