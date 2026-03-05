@@ -14,7 +14,10 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 - **Token persistence**: Refreshed tokens are written back to the credentials file, so restarts also pick up valid tokens
 - **Input validation**: Added validation for resource URIs, search queries, and file IDs
 - **Search results include file IDs**: So you can actually use them with the download tool or resource reader
+- **Read tool**: Read file contents inline (Google Docs as Markdown, Sheets as CSV, etc.)
 - **Download tool**: Save files to a local directory instead of returning base64 blobs that overflow LLM context windows
+- **Sheets read tool**: Read Google Sheets with A1 range notation, returned as formatted markdown tables
+- **Shared Drive support**: Search and read files from Shared Drives (formerly Team Drives)
 - **Opt-in resources**: MCP resource handlers are disabled by default to prevent hangs in clients that call `resources/list` on startup
 
 ## Setup
@@ -23,7 +26,7 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a project (or use an existing one)
-3. Enable the Google Drive API
+3. Enable the **Google Drive API** and **Google Sheets API**
 4. Create OAuth 2.0 credentials (Desktop application type)
 5. Download the JSON and save it as `gcp-oauth.keys.json`
 
@@ -86,7 +89,7 @@ claude mcp add --scope user gdrive -- node /path/to/gdrive-mcp-server/dist/index
 ## Tools
 
 ### `search`
-Search for files in Google Drive by full-text query.
+Search for files in Google Drive by full-text query. Searches across personal and Shared Drives.
 
 ```json
 { "query": "quarterly report" }
@@ -94,14 +97,30 @@ Search for files in Google Drive by full-text query.
 
 Returns file names, MIME types, and IDs.
 
-### `download`
-Download a file from Google Drive to a local directory. Use the file ID from search results. Google Workspace files are auto-exported (Docs to Markdown, Sheets to CSV, etc.). Binary files (PDFs, images) are saved as-is.
+### `read`
+Read a file's contents inline. Google Workspace files are auto-converted (Docs to Markdown, Sheets to CSV, Presentations to plain text). Binary files return a message suggesting the download tool instead.
 
 ```json
 { "fileId": "1abc123def456" }
 ```
 
-Returns the local file path where the file was saved. This avoids returning large base64 blobs that overflow LLM context windows.
+### `download`
+Download a file from Google Drive to a local directory. Same auto-conversion as `read`, but saves to disk instead of returning inline. Best for large files or binary formats (PDFs, images).
+
+```json
+{ "fileId": "1abc123def456" }
+```
+
+Returns the local file path where the file was saved.
+
+### `sheets_read`
+Read a Google Sheets spreadsheet with optional A1 range notation. Returns a formatted markdown table with headers. More structured than reading a sheet as CSV via the `read` tool.
+
+```json
+{ "spreadsheetId": "1abc123def456", "range": "Sheet1!A1:D20" }
+```
+
+Omit `range` to read the entire first sheet. Supports sheet names (`Sheet1`), ranges (`A1:C10`), or both (`Sheet1!A1:C10`).
 
 ## Resources (opt-in)
 

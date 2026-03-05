@@ -2,6 +2,7 @@
 
 import { authenticate } from "@google-cloud/local-auth";
 import { drive_v3 } from "@googleapis/drive";
+import { sheets_v4 } from "@googleapis/sheets";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -37,6 +38,7 @@ const oauthKeysPath =
   path.join(os.homedir(), "gcp-oauth.keys.json");
 
 let drive: drive_v3.Drive;
+let sheets: sheets_v4.Sheets;
 
 const serverCapabilities: Record<string, Record<string, never>> = { tools: {} };
 if (ENABLE_RESOURCES) {
@@ -46,7 +48,7 @@ if (ENABLE_RESOURCES) {
 const server = new Server(
   {
     name: "gdrive-mcp-server",
-    version: "0.8.0",
+    version: "0.9.0",
   },
   {
     capabilities: serverCapabilities,
@@ -60,6 +62,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
   const params: Record<string, unknown> = {
     pageSize,
     fields: "nextPageToken, files(id, name, mimeType)",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
   };
 
   if (request.params?.cursor) {
@@ -92,6 +97,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const file = await drive.files.get({
     fileId,
     fields: "mimeType, size",
+    supportsAllDrives: true,
   });
 
   if (file.data.mimeType?.startsWith("application/vnd.google-apps")) {
@@ -138,7 +144,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   }
 
   const res = await drive.files.get(
-    { fileId, alt: "media" },
+    { fileId, alt: "media", supportsAllDrives: true },
     { responseType: "arraybuffer" },
   );
   const mimeType = file.data.mimeType || "application/octet-stream";
@@ -218,6 +224,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "read",
+        description:
+          "Read a file's contents from Google Drive and return it inline. " +
+          "Google Docs are exported as Markdown, Sheets as CSV, " +
+          "Presentations as plain text. Binary files return a base64 snippet. " +
+          "For large files, use the download tool instead.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            fileId: {
+              type: "string",
+              description: "The Google Drive file ID (from search results)",
+            },
+          },
+          required: ["fileId"],
+        },
+      },
+      {
         name: "download",
         description:
           "Download a file from Google Drive to a local directory. " +
@@ -232,6 +256,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["fileId"],
+        },
+      },
+      {
+        name: "sheets_read",
+        description:
+          "Read a Google Sheets spreadsheet with optional range (A1 notation). " +
+          "Returns cell values as a formatted table. More structured than reading " +
+          "a sheet as CSV via the read tool.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            spreadsheetId: {
+              type: "string",
+              description: "The Google Sheets spreadsheet ID",
+            },
+            range: {
+              type: "string",
+              description:
+                "Optional A1 range (e.g. 'Sheet1!A1:C10', 'A1:Z', 'Sheet1'). " +
+                "Omit to read the first sheet.",
+            },
+          },
+          required: ["spreadsheetId"],
         },
       },
     ],
@@ -254,6 +301,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       q: formattedQuery,
       pageSize: 10,
       fields: "files(id, name, mimeType, modifiedTime, size)",
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: "allDrives",
     });
 
     const files = res.data.files ?? [];
@@ -265,6 +315,137 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         {
           type: "text" as const,
           text: `Found ${files.length} files:\n${fileList}`,
+        },
+      ],
+      isError: false,
+    };
+  }
+  if (request.params.name === "read") {
+    const fileId = request.params.arguments?.fileId as string;
+    if (!fileId || typeof fileId !== "string") {
+      throw new Error("fileId must be a non-empty string");
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(fileId)) {
+      throw new Error("Invalid file ID");
+    }
+
+    const file = await drive.files.get({
+      fileId,
+      fields: "name, mimeType, size",
+      supportsAllDrives: true,
+    });
+
+    const fileName = file.data.name ?? "untitled";
+    const mimeType = file.data.mimeType ?? "application/octet-stream";
+
+    if (mimeType.startsWith("application/vnd.google-apps")) {
+      const exportMimeType = getExportMimeType(mimeType);
+      const res = await drive.files.export(
+        { fileId, mimeType: exportMimeType },
+        { responseType: "text" },
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `# ${fileName}\n\n${String(res.data)}`,
+          },
+        ],
+        isError: false,
+      };
+    }
+
+    const fileSize = parseInt(file.data.size ?? "0", 10);
+    if (fileSize > MAX_FILE_SIZE_BYTES) {
+      throw new Error(
+        `File too large (${Math.round(fileSize / 1024 / 1024)} MB). ` +
+          `Use the download tool instead.`,
+      );
+    }
+
+    if (mimeType.startsWith("text/") || mimeType === "application/json") {
+      const res = await drive.files.get(
+        { fileId, alt: "media", supportsAllDrives: true },
+        { responseType: "text" },
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `# ${fileName}\n\n${String(res.data)}`,
+          },
+        ],
+        isError: false,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `"${fileName}" is a binary file (${mimeType}, ${fileSize} bytes). Use the download tool to save it locally.`,
+        },
+      ],
+      isError: false,
+    };
+  }
+  if (request.params.name === "sheets_read") {
+    const spreadsheetId = request.params.arguments?.spreadsheetId as string;
+    if (!spreadsheetId || typeof spreadsheetId !== "string") {
+      throw new Error("spreadsheetId must be a non-empty string");
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(spreadsheetId)) {
+      throw new Error("Invalid spreadsheet ID");
+    }
+
+    const range = request.params.arguments?.range as string | undefined;
+    if (range && range.length > 200) {
+      throw new Error("Range too long");
+    }
+
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: "properties.title, sheets.properties.title",
+    });
+
+    const effectiveRange =
+      range || meta.data.sheets?.[0]?.properties?.title || "Sheet1";
+
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: effectiveRange,
+      valueRenderOption: "FORMATTED_VALUE",
+    });
+
+    const rows = res.data.values ?? [];
+    if (rows.length === 0) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Spreadsheet "${meta.data.properties?.title}" range "${effectiveRange}" is empty.`,
+          },
+        ],
+        isError: false,
+      };
+    }
+
+    const header = rows[0];
+    const separator = header.map(() => "---");
+    const table = [
+      `| ${header.join(" | ")} |`,
+      `| ${separator.join(" | ")} |`,
+      ...rows.slice(1).map(
+        (row) =>
+          `| ${header.map((_, i) => String(row[i] ?? "")).join(" | ")} |`,
+      ),
+    ].join("\n");
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `# ${meta.data.properties?.title}\nRange: ${effectiveRange} (${rows.length} rows)\n\n${table}`,
         },
       ],
       isError: false,
@@ -282,6 +463,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const file = await drive.files.get({
       fileId,
       fields: "name, mimeType, size",
+      supportsAllDrives: true,
     });
 
     const fileName = file.data.name ?? "untitled";
@@ -322,7 +504,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     const res = await drive.files.get(
-      { fileId, alt: "media" },
+      { fileId, alt: "media", supportsAllDrives: true },
       { responseType: "arraybuffer" },
     );
 
@@ -365,7 +547,10 @@ async function authenticateAndSaveCredentials() {
   console.log("Launching auth flow...");
   const auth = await authenticate({
     keyfilePath: oauthKeysPath,
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    scopes: [
+      "https://www.googleapis.com/auth/drive.readonly",
+      "https://www.googleapis.com/auth/spreadsheets.readonly",
+    ],
   });
   writeCredentials(credentialsPath, auth.credentials);
   console.log("Credentials saved. You can now run the server.");
@@ -405,6 +590,7 @@ async function loadCredentialsAndRunServer() {
   });
 
   drive = new drive_v3.Drive({ auth });
+  sheets = new sheets_v4.Sheets({ auth });
 
   console.error("Credentials loaded. Starting server.");
   const transport = new StdioServerTransport();

@@ -1,6 +1,6 @@
 {
   "name": "@anthropic-community/server-gdrive",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "MCP server for Google Drive with automatic OAuth token refresh",
   "license": "MIT",
   "author": "Dylan Caponi",
@@ -21,6 +21,7 @@
   "dependencies": {
     "@google-cloud/local-auth": "^3.0.1",
     "@googleapis/drive": "^20.1.0",
+    "@googleapis/sheets": "^13.0.1",
     "@modelcontextprotocol/sdk": "^1.0.1",
     "google-auth-library": "^10.6.1"
   },
