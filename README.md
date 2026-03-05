@@ -1,5 +1,7 @@
 # Google Drive MCP Server
 
+> **If you find this useful, [please star the repo](https://github.com/dylancaponi/gdrive-mcp-server) :)**
+
 An actively maintained fork of Anthropic's archived [`@modelcontextprotocol/server-gdrive`](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive), with a critical bug fix for OAuth token auto-refresh.
 
 ## Why this fork?
@@ -27,27 +29,46 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 
 > **Tip:** If your OAuth consent screen is in "Testing" mode, refresh tokens expire after 7 days. [Publish to "Production"](https://console.cloud.google.com/apis/credentials/consent) for permanent refresh tokens.
 
-### 2. Authenticate
+### 2. Clone and build
 
 ```bash
-npx @anthropic-community/server-gdrive auth
+git clone https://github.com/dylancaponi/gdrive-mcp-server.git
+cd gdrive-mcp-server
+npm install && npm run build
+```
+
+### 3. Authenticate
+
+```bash
+GDRIVE_OAUTH_PATH=/path/to/your/gcp-oauth.keys.json node dist/index.js auth
 ```
 
 This opens a browser for Google OAuth consent and saves credentials to `~/.gdrive-server-credentials.json`.
 
-### 3. Configure in Claude Code
+### 4. Configure in Claude Code
 
-Add to your `.claude/settings.json` or project MCP config:
+Add to your `~/.claude.json` (global) or project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "gdrive": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-community/server-gdrive"]
+      "type": "stdio",
+      "command": "node",
+      "args": ["/path/to/gdrive-mcp-server/dist/index.js"],
+      "env": {
+        "GDRIVE_OAUTH_PATH": "/path/to/gcp-oauth.keys.json",
+        "GDRIVE_CREDENTIALS_PATH": "/path/to/.gdrive-server-credentials.json"
+      }
     }
   }
 }
+```
+
+Or use the Claude Code CLI:
+
+```bash
+claude mcp add --scope user gdrive -- node /path/to/gdrive-mcp-server/dist/index.js
 ```
 
 ### Environment variables
