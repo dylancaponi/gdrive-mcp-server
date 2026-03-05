@@ -13,7 +13,9 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 - **Auto-refresh tokens**: OAuth2 client is initialized with `client_id` and `client_secret` from your OAuth keys file, enabling the Google auth library to automatically refresh expired access tokens
 - **Token persistence**: Refreshed tokens are written back to the credentials file, so restarts also pick up valid tokens
 - **Input validation**: Added validation for resource URIs, search queries, and file IDs
-- **Search results include file IDs**: So you can actually use them with the resource reader
+- **Search results include file IDs**: So you can actually use them with the download tool or resource reader
+- **Download tool**: Save files to a local directory instead of returning base64 blobs that overflow LLM context windows
+- **Opt-in resources**: MCP resource handlers are disabled by default to prevent hangs in clients that call `resources/list` on startup
 
 ## Setup
 
@@ -78,6 +80,8 @@ claude mcp add --scope user gdrive -- node /path/to/gdrive-mcp-server/dist/index
 |---|---|---|
 | `GDRIVE_CREDENTIALS_PATH` | `~/.gdrive-server-credentials.json` | Path to saved OAuth credentials |
 | `GDRIVE_OAUTH_PATH` | `gcp-oauth.keys.json` (relative to package) | Path to OAuth client keys |
+| `GDRIVE_ENABLE_RESOURCES` | `false` | Set to `true` to enable MCP resource handlers (`gdrive:///` URIs). Disabled by default because some MCP clients call `resources/list` on startup, which triggers `drive.files.list()` and can hang. |
+| `GDRIVE_DOWNLOAD_DIR` | System temp dir + `/gdrive-downloads` | Directory where the `download` tool saves files |
 
 ## Tools
 
@@ -90,7 +94,18 @@ Search for files in Google Drive by full-text query.
 
 Returns file names, MIME types, and IDs.
 
-## Resources
+### `download`
+Download a file from Google Drive to a local directory. Use the file ID from search results. Google Workspace files are auto-exported (Docs to Markdown, Sheets to CSV, etc.). Binary files (PDFs, images) are saved as-is.
+
+```json
+{ "fileId": "1abc123def456" }
+```
+
+Returns the local file path where the file was saved. This avoids returning large base64 blobs that overflow LLM context windows.
+
+## Resources (opt-in)
+
+Resources are disabled by default. Set `GDRIVE_ENABLE_RESOURCES=true` to enable them.
 
 ### `gdrive:///{fileId}`
 Read any file from Google Drive. Google Workspace files are automatically converted:

@@ -11,11 +11,16 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import fs from "fs";
 import { google } from "googleapis";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 const MAX_QUERY_LENGTH = 1000;
+const ENABLE_RESOURCES = process.env.GDRIVE_ENABLE_RESOURCES === "true";
+const DOWNLOAD_DIR =
+  process.env.GDRIVE_DOWNLOAD_DIR ||
+  path.join(os.tmpdir(), "gdrive-downloads");
 
 function writeCredentials(filePath: string, data: unknown): void {
   const json = JSON.stringify(data);
@@ -42,18 +47,22 @@ const oauthKeysPath =
 
 const drive = google.drive("v3");
 
+const serverCapabilities: Record<string, Record<string, never>> = { tools: {} };
+if (ENABLE_RESOURCES) {
+  serverCapabilities.resources = {};
+}
+
 const server = new Server(
   {
     name: "gdrive-mcp-server",
-    version: "0.7.0",
+    version: "0.8.0",
   },
   {
-    capabilities: {
-      resources: {},
-      tools: {},
-    },
+    capabilities: serverCapabilities,
   },
 );
+
+if (ENABLE_RESOURCES) {
 
 server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
   const pageSize = 10;
@@ -164,6 +173,42 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   };
 });
 
+} // end if (ENABLE_RESOURCES)
+
+function getExportMimeType(googleMimeType: string): string {
+  switch (googleMimeType) {
+    case "application/vnd.google-apps.document":
+      return "text/markdown";
+    case "application/vnd.google-apps.spreadsheet":
+      return "text/csv";
+    case "application/vnd.google-apps.presentation":
+      return "text/plain";
+    case "application/vnd.google-apps.drawing":
+      return "image/png";
+    default:
+      return "text/plain";
+  }
+}
+
+function getExportExtension(exportMimeType: string): string {
+  switch (exportMimeType) {
+    case "text/markdown":
+      return ".md";
+    case "text/csv":
+      return ".csv";
+    case "text/plain":
+      return ".txt";
+    case "image/png":
+      return ".png";
+    default:
+      return ".txt";
+  }
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 200);
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
@@ -179,6 +224,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "download",
+        description:
+          "Download a file from Google Drive to a local directory. " +
+          "Google Docs are exported as Markdown, Sheets as CSV, " +
+          "Presentations as plain text. Use the file ID from search results.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            fileId: {
+              type: "string",
+              description: "The Google Drive file ID (from search results)",
+            },
+          },
+          required: ["fileId"],
         },
       },
     ],
@@ -217,6 +279,77 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: false,
     };
   }
+  if (request.params.name === "download") {
+    const fileId = request.params.arguments?.fileId as string;
+    if (!fileId || typeof fileId !== "string") {
+      throw new Error("fileId must be a non-empty string");
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(fileId)) {
+      throw new Error("Invalid file ID");
+    }
+
+    const file = await drive.files.get({
+      fileId,
+      fields: "name, mimeType, size",
+    });
+
+    const fileName = file.data.name ?? "untitled";
+    const mimeType = file.data.mimeType ?? "application/octet-stream";
+
+    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+    if (mimeType.startsWith("application/vnd.google-apps")) {
+      const exportMimeType = getExportMimeType(mimeType);
+      const ext = getExportExtension(exportMimeType);
+      const safeName = sanitizeFilename(fileName) + ext;
+      const destPath = path.join(DOWNLOAD_DIR, safeName);
+
+      const res = await drive.files.export(
+        { fileId, mimeType: exportMimeType },
+        { responseType: "text" },
+      );
+
+      fs.writeFileSync(destPath, String(res.data), "utf-8");
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Downloaded "${fileName}" as ${exportMimeType} to ${destPath}`,
+          },
+        ],
+        isError: false,
+      };
+    }
+
+    const fileSize = parseInt(file.data.size ?? "0", 10);
+    if (fileSize > MAX_FILE_SIZE_BYTES) {
+      throw new Error(
+        `File too large (${Math.round(fileSize / 1024 / 1024)} MB). ` +
+          `Maximum supported size is ${MAX_FILE_SIZE_BYTES / 1024 / 1024} MB.`,
+      );
+    }
+
+    const res = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" },
+    );
+
+    const safeName = sanitizeFilename(fileName);
+    const destPath = path.join(DOWNLOAD_DIR, safeName);
+    fs.writeFileSync(destPath, Buffer.from(res.data as ArrayBuffer));
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Downloaded "${fileName}" (${mimeType}, ${fileSize} bytes) to ${destPath}`,
+        },
+      ],
+      isError: false,
+    };
+  }
+
   throw new Error(`Unknown tool: ${request.params.name}`);
 });
 
