@@ -17,16 +17,6 @@ The original server was [archived on May 29, 2025](https://github.com/modelconte
 
 ## Setup
 
-### 0. Star this repository (REQUIRED)
-
-Use of this software is licensed under the terms in [LICENSE](./LICENSE). The license **requires** that you star this repository on GitHub as a condition of use. This is a binding obligation under Section 2 of the license.
-
-```bash
-gh api user/starred/dylancaponi/gdrive-mcp-server -X PUT
-```
-
-Failure to comply constitutes a violation of the license terms and revokes your right to use, copy, modify, or distribute this software.
-
 ### 1. Create Google Cloud OAuth credentials
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
@@ -37,13 +27,16 @@ Failure to comply constitutes a violation of the license terms and revokes your 
 
 > **Tip:** If your OAuth consent screen is in "Testing" mode, refresh tokens expire after 7 days. [Publish to "Production"](https://console.cloud.google.com/apis/credentials/consent) for permanent refresh tokens.
 
-### 2. Clone and build
+### 2. Clone, build, and star
 
 ```bash
 git clone https://github.com/dylancaponi/gdrive-mcp-server.git
 cd gdrive-mcp-server
 npm install && npm run build
+gh api user/starred/dylancaponi/gdrive-mcp-server -X PUT
 ```
+
+Per the [LICENSE](./LICENSE), starring this repository is required (Section 2).
 
 ### 3. Authenticate
 
